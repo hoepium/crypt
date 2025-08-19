@@ -1,142 +1,103 @@
 import os
-import telebot
 import requests
-from flask import Flask
-from threading import Thread
+from flask import Flask, request
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ========================
-# CONFIG
-# ========================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")  # put your bot token in Replit secrets
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))  # your Telegram user ID
-bot = telebot.TeleBot(BOT_TOKEN)
+# ================== CONFIG ==================
+TOKEN = os.getenv("BOT_TOKEN")  # put your Telegram bot token in Replit secrets
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # your Telegram user id
+BINANCE_API = "https://api.binance.com/api/v3/ticker/24hr"
 
-# ========================
-# KEEP ALIVE (for UptimeRobot ping)
-# ========================
-app = Flask('')
+# Flask app for webhook
+app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "Bot is running!"
+# Telegram bot application
+application = Application.builder().token(TOKEN).build()
 
-def run():
-    app.run(host="0.0.0.0", port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# ========================
-# BINANCE API HELPER
-# ========================
-BINANCE_URL = "https://api.binance.com/api/v3"
-
-def get_price(symbol: str):
+# ============== HELPER FUNCTIONS ==============
+def get_binance_price(symbol: str):
     try:
-        resp = requests.get(f"{BINANCE_URL}/ticker/price", params={"symbol": symbol.upper()})
-        data = resp.json()
-        return float(data["price"])
-    except Exception:
-        return None
-
-def get_stats(symbol: str):
-    try:
-        resp = requests.get(f"{BINANCE_URL}/ticker/24hr", params={"symbol": symbol.upper()})
-        data = resp.json()
+        url = f"{BINANCE_API}?symbol={symbol.upper()}USDT"
+        data = requests.get(url).json()
         return {
-            "lastPrice": float(data["lastPrice"]),
-            "high": float(data["highPrice"]),
-            "low": float(data["lowPrice"]),
-            "volume": float(data["volume"]),
-            "change": float(data["priceChangePercent"])
+            "symbol": symbol.upper(),
+            "price": data["lastPrice"],
+            "change": data["priceChangePercent"]
         }
     except Exception:
         return None
 
-# ========================
-# COMMANDS
-# ========================
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    if message.chat.type == "private":  # only private chats
-        bot.reply_to(message, 
-            "👋 Welcome!\n\n"
-            "Here are my commands:\n"
-            "📊 /price <symbol> → Current price (e.g. /price BTCUSDT)\n"
-            "📈 /stats <symbol> → 24h stats (e.g. /stats BTCUSDT)\n"
-            "💱 /convert <amount> <from> <to> → Convert (e.g. /convert 1 BTC USDT)\n"
-            "🛠️ /say <text> → (Admin only) broadcast"
+# ============== COMMAND HANDLERS ==============
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        await update.message.reply_text(
+            "👋 Hey! I’m your Crypto Bot.\n\n"
+            "Available commands:\n"
+            "/price <symbol> → Get current price\n"
+            "/change <symbol> → 24h price change\n"
+            "/send <chat_id> <message> → (admin only)"
         )
 
-@bot.message_handler(commands=['price'])
-def price_handler(message):
-    parts = message.text.split()
-    if len(parts) != 2:
-        bot.reply_to(message, "❌ Usage: /price BTCUSDT")
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /price BTC")
         return
-    symbol = parts[1].upper()
-    price = get_price(symbol)
-    if price:
-        bot.reply_to(message, f"💰 {symbol} = {price:.2f}")
-    else:
-        bot.reply_to(message, "❌ Invalid symbol")
-
-@bot.message_handler(commands=['stats'])
-def stats_handler(message):
-    parts = message.text.split()
-    if len(parts) != 2:
-        bot.reply_to(message, "❌ Usage: /stats BTCUSDT")
-        return
-    symbol = parts[1].upper()
-    stats = get_stats(symbol)
-    if stats:
-        reply = (
-            f"📊 {symbol} 24h Stats\n"
-            f"Price: {stats['lastPrice']:.2f}\n"
-            f"High: {stats['high']:.2f}\n"
-            f"Low: {stats['low']:.2f}\n"
-            f"Volume: {stats['volume']:.2f}\n"
-            f"Change: {stats['change']:.2f}%"
+    coin = context.args[0].upper()
+    data = get_binance_price(coin)
+    if data:
+        await update.message.reply_text(
+            f"💰 {data['symbol']} Price: ${data['price']}"
         )
-        bot.reply_to(message, reply)
     else:
-        bot.reply_to(message, "❌ Invalid symbol")
+        await update.message.reply_text("❌ Invalid symbol or API error.")
 
-@bot.message_handler(commands=['convert'])
-def convert_handler(message):
-    parts = message.text.split()
-    if len(parts) != 4:
-        bot.reply_to(message, "❌ Usage: /convert <amount> <from> <to>")
+async def change(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /change BTC")
         return
+    coin = context.args[0].upper()
+    data = get_binance_price(coin)
+    if data:
+        await update.message.reply_text(
+            f"📊 {data['symbol']} 24h Change: {data['change']}%"
+        )
+    else:
+        await update.message.reply_text("❌ Invalid symbol or API error.")
+
+async def send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("🚫 You are not allowed to use this.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("⚠️ Usage: /send <chat_id> <message>")
+        return
+    chat_id = context.args[0]
+    msg = " ".join(context.args[1:])
     try:
-        amount = float(parts[1])
-        from_symbol = parts[2].upper()
-        to_symbol = parts[3].upper()
-        symbol = from_symbol + to_symbol
-        price = get_price(symbol)
-        if not price:
-            bot.reply_to(message, "❌ Invalid pair")
-            return
-        converted = amount * price
-        bot.reply_to(message, f"💱 {amount} {from_symbol} = {converted:.4f} {to_symbol}")
-    except Exception:
-        bot.reply_to(message, "⚠️ Error, check input")
+        await context.bot.send_message(chat_id, msg)
+        await update.message.reply_text("✅ Message sent.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
 
-@bot.message_handler(commands=['say'])
-def say_handler(message):
-    if message.from_user.id == ADMIN_ID:
-        text = message.text.replace("/say", "").strip()
-        if text:
-            bot.send_message(message.chat.id, f"📢 {text}")
-        else:
-            bot.reply_to(message, "❌ Usage: /say <text>")
-    else:
-        bot.reply_to(message, "🚫 You are not allowed.")
+# ============== REGISTER HANDLERS ==============
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("price", price))
+application.add_handler(CommandHandler("change", change))
+application.add_handler(CommandHandler("send", send))
 
-# ========================
-# RUN
-# ========================
-keep_alive()
-print("🤖 Bot is running...")
-bot.infinity_polling()
+# ============== FLASK WEBHOOK ENDPOINT ==============
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    application.update_queue.put_nowait(update)
+    return "ok", 200
+
+@app.route("/", methods=["GET"])
+def index():
+    return "Bot is running!", 200
+
+# ============== RUN ==============
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
